@@ -43,24 +43,20 @@ function getFriday() {
   d.setDate(d.getDate() - day + (day === 0 ? -6 : 1) + 4);
   return d.toISOString().slice(0, 10);
 }
-
 function migrateTasks(tasks) {
   const m = {};
   for (const [k, items] of Object.entries(tasks))
     m[k] = items.map((t) => typeof t === "string" ? { text: t, level: 0 } : t);
   return m;
 }
-
 function ls(key, fb) { try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fb; } catch { return fb; } }
 function lsSet(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }
-
 function loadStorage(key, dateCheck) {
   const p = ls(key, null);
   if (!p || (dateCheck && p.date !== dateCheck)) return null;
   if (p.tasks) p.tasks = migrateTasks(p.tasks);
   return p;
 }
-
 function loadHistory() { return ls(HISTORY_KEY, []); }
 function saveToHistory(entry) {
   const h = loadHistory();
@@ -69,14 +65,12 @@ function saveToHistory(entry) {
   lsSet(HISTORY_KEY, h.slice(-30));
 }
 
-// Toast hook
 function useToast() {
   const [msg, setMsg] = useState(null);
-  const timer = useRef(null);
+  const t = useRef(null);
   const show = useCallback((text, ms = 2000) => {
-    clearTimeout(timer.current);
-    setMsg(text);
-    timer.current = setTimeout(() => setMsg(null), ms);
+    clearTimeout(t.current); setMsg(text);
+    t.current = setTimeout(() => setMsg(null), ms);
   }, []);
   return [msg, show];
 }
@@ -94,13 +88,31 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showOutput, setShowOutput] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [editingTask, setEditingTask] = useState(null);
   const [editingTaskValue, setEditingTaskValue] = useState("");
   const [toast, showToast] = useToast();
+  const [installPrompt, setInstallPrompt] = useState(null);
   const inputRefs = useRef({});
   const clearTimer = useRef(null);
 
+  // PWA install prompt
+  useEffect(() => {
+    const handler = (e) => { e.preventDefault(); setInstallPrompt(e); };
+    window.addEventListener("beforeinstallprompt", handler);
+    return () => window.removeEventListener("beforeinstallprompt", handler);
+  }, []);
+
+  const handleInstall = async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    const result = await installPrompt.userChoice;
+    if (result.outcome === "accepted") showToast("App instalado!");
+    setInstallPrompt(null);
+  };
+
+  // Load data
   useEffect(() => {
     if (mode === "daily") {
       const s = loadStorage(STORAGE_KEY, getToday());
@@ -111,6 +123,7 @@ export default function App() {
     }
   }, [mode]);
 
+  // Save data
   useEffect(() => {
     if (mode === "daily") lsSet(STORAGE_KEY, { tasks, date: getToday() });
     else lsSet(STORAGE_KEY_WEEKLY, { tasks, priorities, date: getWeekId() });
@@ -128,6 +141,35 @@ export default function App() {
     });
     setMode(m); localStorage.setItem(MODE_KEY, m);
     setShowOutput(false); setInputLevels({});
+  };
+
+  // Import from history
+  const getImportableDays = () => {
+    const h = loadHistory();
+    return h.filter((x) => x.mode === "daily" && x.date !== getToday()).slice(-7).reverse();
+  };
+
+  const importFromDay = (entry, mergeMode) => {
+    if (mergeMode === "replace") {
+      setTasks(migrateTasks(entry.tasks));
+    } else {
+      // merge: add tasks that don't exist yet
+      setTasks((prev) => {
+        const merged = { ...prev };
+        for (const [catId, items] of Object.entries(entry.tasks)) {
+          const existing = merged[catId] || [];
+          const migrated = items.map((t) => typeof t === "string" ? { text: t, level: 0 } : t);
+          const newItems = migrated.filter(
+            (t) => !existing.some((e) => e.text === t.text)
+          );
+          if (newItems.length > 0) merged[catId] = [...existing, ...newItems];
+        }
+        return merged;
+      });
+    }
+    setShowImport(false);
+    setCollapsed({});
+    showToast(`Importado de ${entry.date}!`);
   };
 
   const getLevel = (id) => inputLevels[id] || 0;
@@ -157,8 +199,7 @@ export default function App() {
 
   const moveTask = (catId, idx, dir) => {
     setTasks((p) => {
-      const arr = [...(p[catId] || [])];
-      const n = idx + dir;
+      const arr = [...(p[catId] || [])]; const n = idx + dir;
       if (n < 0 || n >= arr.length) return p;
       [arr[idx], arr[n]] = [arr[n], arr[idx]];
       return { ...p, [catId]: arr };
@@ -237,6 +278,7 @@ export default function App() {
   const dateLabel = isW ? `${getMonday()} → ${getFriday()}` : getToday();
   const history = loadHistory();
   const recentDaily = history.filter((h) => h.mode === "daily").slice(-7).reverse();
+  const importableDays = getImportableDays();
 
   const addCategory = () => {
     const name = newCatName.trim();
@@ -259,8 +301,27 @@ export default function App() {
     });
   };
 
+  // Preview helper for history/import
+  const buildPreview = (entryTasks) => {
+    let lines = [];
+    const cats = ls(CATEGORIES_KEY, DEFAULT_CATEGORIES);
+    cats.forEach((cat) => {
+      const t = entryTasks[cat.id] || [];
+      if (!t.length) return;
+      lines.push(`-> ${cat.label}:`);
+      t.forEach((task) => {
+        const txt = typeof task === "string" ? task : task.text;
+        const l = typeof task === "string" ? 0 : (task.level || 0);
+        lines.push(`${l === 1 ? "\t\t" : "\t"}- ${txt};`);
+      });
+    });
+    return lines.join("\n");
+  };
+
+  const countTasks = (entryTasks) => Object.values(entryTasks).reduce((s, a) => s + a.length, 0);
+
   return (
-    <div style={{ minHeight: "100dvh", background: "#0a0a0b", color: "#d4d4d8", fontFamily: "'JetBrains Mono', 'Fira Code', monospace" }}>
+    <div style={{ minHeight: "100dvh", background: "#0a0a0b", color: "#d4d4d8", fontFamily: "'JetBrains Mono','Fira Code',monospace" }}>
       <style>{`
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
@@ -294,7 +355,7 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
 .qt:hover{border-color:${accent};color:${accent};border-style:solid;background:${accentBg}}
 .qt.u{opacity:.3;cursor:default;border-style:solid}
 
-.bp{background:${accent};color:${isW?"#fff":"#0a0a0b"};border:none;font-family:'JetBrains Mono',monospace;font-weight:600;font-size:14px;padding:14px 20px;border-radius:8px;cursor:pointer;transition:all .15s;min-height:48px;width:100%}
+.bp{background:${accent};color:${isW ? "#fff" : "#0a0a0b"};border:none;font-family:'JetBrains Mono',monospace;font-weight:600;font-size:14px;padding:14px 20px;border-radius:8px;cursor:pointer;transition:all .15s;min-height:48px;width:100%}
 .bp:hover{filter:brightness(1.15);transform:translateY(-1px)}.bp:active{transform:translateY(0)}.bp.cp{background:#22c55e}
 
 .bg{background:none;border:1px solid #27272a;color:#71717a;font-family:'JetBrains Mono',monospace;font-size:12px;padding:10px 14px;border-radius:8px;cursor:pointer;transition:all .15s;min-height:48px}
@@ -304,12 +365,12 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
 
 .bdg{display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;min-width:20px;height:20px;border-radius:10px;padding:0 6px;flex-shrink:0}
 
-/* HEADER */
 .hdr{background:#0f0f11;border-bottom:1px solid #1e1e22;padding:10px 16px;position:sticky;top:0;z-index:10}
 .hdr-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .hdr-l{display:flex;align-items:center;gap:8px;min-width:0}
 .hdr-r{display:flex;align-items:center;gap:8px}
 .hdr-meta{display:flex;align-items:center;gap:12px;padding-top:8px;justify-content:space-between}
+.hdr-r-desktop{display:none}
 
 .mt{display:flex;background:#18181b;border:1px solid #27272a;border-radius:8px;overflow:hidden}
 .mb{background:none;border:none;color:#52525b;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;padding:8px 14px;cursor:pointer;transition:all .15s;min-height:36px}
@@ -344,20 +405,32 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
 .acts{display:flex;flex-direction:column;gap:8px;margin-top:24px}
 .acts-r{display:flex;gap:8px}
 
-.hi{background:#18181b;border:1px solid #27272a;border-radius:8px;padding:12px;margin-bottom:8px}
-.hd{font-size:11px;color:${accent};font-weight:600;margin-bottom:6px}
+.hi{background:#18181b;border:1px solid #27272a;border-radius:8px;padding:12px;margin-bottom:8px;cursor:default}
+.hd{font-size:11px;font-weight:600;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between}
 .ht{font-size:11px;color:#71717a;line-height:1.5;white-space:pre-wrap;max-height:120px;overflow-y:auto;-webkit-overflow-scrolling:touch}
 
 .cw{background:#7f1d1d!important;border-color:#ef4444!important;color:#fff!important}
-
-.cc{display:flex;align-items:center;gap:6px;font-size:10px;color:#3f3f46}
-.cc.warn{color:#ef4444}
+.cc{display:flex;align-items:center;gap:6px;font-size:10px;color:#3f3f46}.cc.warn{color:#ef4444}
 
 .toast{position:fixed;bottom:max(24px,env(safe-area-inset-bottom,24px));left:50%;transform:translateX(-50%);background:#22c55e;color:#fff;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;padding:10px 24px;border-radius:10px;z-index:200;animation:su .2s ease-out;pointer-events:none;white-space:nowrap}
 
 .set-item{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:8px;margin-bottom:4px;background:#18181b;gap:8px}
-.set-item .set-l{display:flex;align-items:center;gap:8px;flex:1;min-width:0;overflow:hidden}
-.set-item .set-r{display:flex;align-items:center;gap:2px;flex-shrink:0}
+.set-l{display:flex;align-items:center;gap:8px;flex:1;min-width:0;overflow:hidden}
+.set-r{display:flex;align-items:center;gap:2px;flex-shrink:0}
+
+.imp-btn{background:none;border:1px solid #27272a;color:#71717a;font-family:'JetBrains Mono',monospace;font-size:11px;padding:6px 12px;border-radius:6px;cursor:pointer;transition:all .15s;min-height:36px}
+.imp-btn:hover{border-color:${accent};color:${accent};background:${accentBg}}
+.imp-btn.merge{border-color:#22c55e;color:#22c55e}.imp-btn.merge:hover{background:#0a1a0f}
+.imp-btn.replace{border-color:#f59e0b;color:#f59e0b}.imp-btn.replace:hover{background:#1a1508}
+
+.install-bar{background:#18181b;border:1px solid #27272a;border-radius:10px;padding:12px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px;animation:fi .3s ease-out}
+.install-bar span{font-size:12px;color:#a1a1aa}
+.install-btn{background:${accent};color:${isW ? "#fff" : "#0a0a0b"};border:none;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;padding:8px 16px;border-radius:6px;cursor:pointer;min-height:36px;white-space:nowrap}
+
+.empty-state{text-align:center;padding:40px 20px;color:#3f3f46}
+.empty-state .icon{font-size:32px;margin-bottom:12px;opacity:.5}
+.empty-state .msg{font-size:13px;line-height:1.6}
+.empty-state .imp-link{color:${accent};cursor:pointer;text-decoration:underline;text-underline-offset:3px}
 
 @media(hover:none)and(pointer:coarse){.ta{opacity:1!important}}
 @media(hover:hover)and(pointer:fine){
@@ -370,10 +443,11 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
   .acts{flex-direction:row;justify-content:space-between;flex-wrap:wrap}
   .acts-r{flex:1}
   .bp{width:auto}
-  .hdr-meta{padding-top:0;gap:16px}
-  .hdr-top{gap:12px}
-  .hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px}
-  .hdr-top{flex:1}.hdr-meta{padding:0}
+  .hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;gap:16px}
+  .hdr-top{flex:none;gap:12px}
+  .hdr-meta{padding:0;gap:16px;flex:1;justify-content:flex-end}
+  .hdr-r{display:none}
+  .hdr-r-desktop{display:flex;align-items:center;gap:8px}
 }
 @media(max-width:480px){
   .mb{padding:6px 10px;font-size:11px}
@@ -390,7 +464,6 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
 .fi{animation:fi .2s ease-out}
       `}</style>
 
-      {/* Toast */}
       {toast && <div className="toast">{toast}</div>}
 
       {/* Header */}
@@ -404,6 +477,7 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
               <button className={`mb ${mode === "weekly" ? "onw" : ""}`} onClick={() => switchMode("weekly")}>Semanal</button>
             </div>
           </div>
+          {/* Mobile-only buttons */}
           <div className="hdr-r">
             {isW && <button className="bg" onClick={() => setShowHistory(true)} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>📋</button>}
             <button className="bg" onClick={() => setShowSettings(true)} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>⚙</button>
@@ -411,20 +485,46 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
         </div>
         <div className="hdr-meta">
           <span style={{ fontSize: 10, color: "#52525b" }}>{dateLabel}</span>
-          <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             <span className="st"><b>{totalTasks}</b> tasks</span>
             <span className="st"><b>{activeCats}</b> seções</span>
-            {hasContent && (
-              <span className={`cc ${charCount > SLACK_CHAR_LIMIT ? "warn" : ""}`}>
-                {charCount}/{SLACK_CHAR_LIMIT}
-              </span>
-            )}
+            {hasContent && <span className={`cc ${charCount > SLACK_CHAR_LIMIT ? "warn" : ""}`}>{charCount}/{SLACK_CHAR_LIMIT}</span>}
+          </div>
+          {/* Desktop-only buttons */}
+          <div className="hdr-r-desktop">
+            {isW && <button className="bg" onClick={() => setShowHistory(true)} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>📋</button>}
+            <button className="bg" onClick={() => setShowSettings(true)} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>⚙</button>
           </div>
         </div>
       </div>
 
       {/* Main */}
       <div style={{ maxWidth: 720, margin: "0 auto", padding: "12px 12px 120px" }}>
+
+        {/* PWA install banner */}
+        {installPrompt && (
+          <div className="install-bar">
+            <span>📱 Instalar como app no seu dispositivo?</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button className="install-btn" onClick={handleInstall}>Instalar</button>
+              <button className="ib" onClick={() => setInstallPrompt(null)} style={{ color: "#52525b" }}>✕</button>
+            </div>
+          </div>
+        )}
+
+        {/* Empty state with import CTA */}
+        {!hasContent && mode === "daily" && importableDays.length > 0 && (
+          <div className="empty-state fi">
+            <div className="icon">📝</div>
+            <div className="msg">
+              Nenhuma task ainda hoje.<br />
+              <span className="imp-link" onClick={() => setShowImport(true)}>
+                Importar de um dia anterior?
+              </span>
+            </div>
+          </div>
+        )}
+
         {categories.map((cat) => {
           const ct = tasks[cat.id] || [];
           const qm = QUICK_TASKS[cat.id];
@@ -535,6 +635,11 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
             <button className="bg" onClick={() => setShowOutput(!showOutput)} disabled={!hasContent} style={{ opacity: hasContent ? 1 : 0.4, flex: 1 }}>
               {showOutput ? "Esconder" : "Preview"}
             </button>
+            {mode === "daily" && importableDays.length > 0 && (
+              <button className="bg" onClick={() => setShowImport(true)} style={{ flex: 1 }}>
+                📥 Importar
+              </button>
+            )}
             <button className={`bg ${confirmClear ? "cw" : ""}`} onClick={handleClear} disabled={!hasContent && !confirmClear}
               style={{ opacity: hasContent || confirmClear ? 1 : 0.3, flex: 1 }}>
               {confirmClear ? "Confirmar?" : `Limpar ${isW ? "semana" : "dia"}`}
@@ -548,16 +653,45 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
               <span style={{ fontSize: 11, color: "#52525b", textTransform: "uppercase", letterSpacing: 1 }}>
                 Output → Slack {isW ? "(semanal)" : "(diário)"}
               </span>
-              <span className={`cc ${charCount > SLACK_CHAR_LIMIT ? "warn" : ""}`} style={{ fontSize: 11 }}>
-                {charCount} chars
-              </span>
+              <span className={`cc ${charCount > SLACK_CHAR_LIMIT ? "warn" : ""}`} style={{ fontSize: 11 }}>{charCount} chars</span>
             </div>
             <div className="ob">{output}</div>
           </div>
         )}
       </div>
 
-      {/* History */}
+      {/* Import Modal */}
+      {showImport && (
+        <div className="ov" onClick={() => setShowImport(false)}>
+          <div className="mdl" onClick={(e) => e.stopPropagation()}>
+            <div className="mdl-bar" />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <span style={{ fontWeight: 700, fontSize: 14, color: "#e4e4e7" }}>📥 Importar dia anterior</span>
+              <button className="ib" onClick={() => setShowImport(false)}>✕</button>
+            </div>
+            <div style={{ fontSize: 11, color: "#52525b", marginBottom: 12 }}>
+              Escolha um dia para importar as tasks. <b>Mesclar</b> adiciona sem duplicar, <b>Substituir</b> apaga o atual.
+            </div>
+            {importableDays.length === 0 ? (
+              <div style={{ fontSize: 12, color: "#52525b", textAlign: "center", padding: 24 }}>Nenhum dia anterior salvo.</div>
+            ) : importableDays.map((entry, i) => (
+              <div key={i} className="hi">
+                <div className="hd">
+                  <span style={{ color: accent }}>{entry.date}</span>
+                  <span style={{ fontSize: 10, color: "#52525b" }}>{countTasks(entry.tasks)} tasks</span>
+                </div>
+                <div className="ht">{buildPreview(entry.tasks)}</div>
+                <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+                  <button className="imp-btn merge" onClick={() => importFromDay(entry, "merge")}>+ Mesclar</button>
+                  <button className="imp-btn replace" onClick={() => importFromDay(entry, "replace")}>↻ Substituir</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* History Modal */}
       {showHistory && (
         <div className="ov" onClick={() => setShowHistory(false)}>
           <div className="mdl" onClick={(e) => e.stopPropagation()}>
@@ -567,29 +701,21 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
               <button className="ib" onClick={() => setShowHistory(false)}>✕</button>
             </div>
             {recentDaily.length === 0 ? (
-              <div style={{ fontSize: 12, color: "#52525b", textAlign: "center", padding: 24 }}>
-                Nenhum check-in diário salvo ainda.<br />Salva ao copiar ou trocar de modo.
+              <div style={{ fontSize: 12, color: "#52525b", textAlign: "center", padding: 24 }}>Nenhum check-in salvo ainda.</div>
+            ) : recentDaily.map((entry, i) => (
+              <div key={i} className="hi">
+                <div className="hd">
+                  <span style={{ color: accent }}>{entry.date}</span>
+                  <span style={{ fontSize: 10, color: "#52525b" }}>{countTasks(entry.tasks)} tasks</span>
+                </div>
+                <div className="ht">{buildPreview(entry.tasks)}</div>
               </div>
-            ) : recentDaily.map((entry, i) => {
-              let preview = [];
-              const cats = ls(CATEGORIES_KEY, DEFAULT_CATEGORIES);
-              cats.forEach((cat) => {
-                const t = entry.tasks[cat.id] || [];
-                if (!t.length) return;
-                preview.push(`-> ${cat.label}:`);
-                t.forEach((task) => {
-                  const txt = typeof task === "string" ? task : task.text;
-                  const l = typeof task === "string" ? 0 : (task.level || 0);
-                  preview.push(`${l === 1 ? "\t\t" : "\t"}- ${txt};`);
-                });
-              });
-              return <div key={i} className="hi"><div className="hd">{entry.date}</div><div className="ht">{preview.join("\n")}</div></div>;
-            })}
+            ))}
           </div>
         </div>
       )}
 
-      {/* Settings */}
+      {/* Settings Modal */}
       {showSettings && (
         <div className="ov" onClick={() => setShowSettings(false)}>
           <div className="mdl" onClick={(e) => e.stopPropagation()}>
@@ -605,8 +731,8 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
                   <span style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cat.label}</span>
                 </div>
                 <div className="set-r">
-                  {idx > 0 && <button className="ib mv" onClick={() => moveCat(idx, -1)} title="Subir">↑</button>}
-                  {idx < categories.length - 1 && <button className="ib mv" onClick={() => moveCat(idx, 1)} title="Descer">↓</button>}
+                  {idx > 0 && <button className="ib mv" onClick={() => moveCat(idx, -1)}>↑</button>}
+                  {idx < categories.length - 1 && <button className="ib mv" onClick={() => moveCat(idx, 1)}>↓</button>}
                   <button className="ib dng" onClick={() => removeCategory(cat.id)}>✕</button>
                 </div>
               </div>
