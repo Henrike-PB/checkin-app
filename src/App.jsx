@@ -162,7 +162,6 @@ export default function App() {
     categories.forEach((cat) => {
       const catTasks = tasks[cat.id] || [];
       if (catTasks.length === 0) return;
-      if (lines.length > 0) lines.push("");
       lines.push(`-> ${cat.label}:`);
       catTasks.forEach((t) => {
         const indent = t.level === 1 ? "\t\t" : "\t";
