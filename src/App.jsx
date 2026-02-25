@@ -20,6 +20,7 @@ const QUICK_TASKS = {
   },
 };
 
+const SLACK_CHAR_LIMIT = 4000;
 const STORAGE_KEY = "checkin-data";
 const STORAGE_KEY_WEEKLY = "checkin-data-weekly";
 const CATEGORIES_KEY = "checkin-categories";
@@ -28,25 +29,17 @@ const MODE_KEY = "checkin-mode";
 const COLLAPSED_KEY = "checkin-collapsed";
 
 function getToday() { return new Date().toISOString().slice(0, 10); }
-
 function getWeekId() {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), 0, 1);
-  const diff = now - start;
-  const weekNum = Math.ceil(diff / 604800000);
-  return `${now.getFullYear()}-W${String(weekNum).padStart(2, "0")}`;
+  const d = new Date(), s = new Date(d.getFullYear(), 0, 1);
+  return `${d.getFullYear()}-W${String(Math.ceil((d - s) / 604800000)).padStart(2, "0")}`;
 }
-
 function getMonday() {
-  const d = new Date();
-  const day = d.getDay();
+  const d = new Date(), day = d.getDay();
   d.setDate(d.getDate() - day + (day === 0 ? -6 : 1));
   return d.toISOString().slice(0, 10);
 }
-
 function getFriday() {
-  const d = new Date();
-  const day = d.getDay();
+  const d = new Date(), day = d.getDay();
   d.setDate(d.getDate() - day + (day === 0 ? -6 : 1) + 4);
   return d.toISOString().slice(0, 10);
 }
@@ -58,29 +51,34 @@ function migrateTasks(tasks) {
   return m;
 }
 
-function ls(key, fallback) {
-  try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; }
-  catch { return fallback; }
-}
-
-function lsSet(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
-}
+function ls(key, fb) { try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fb; } catch { return fb; } }
+function lsSet(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }
 
 function loadStorage(key, dateCheck) {
-  const parsed = ls(key, null);
-  if (!parsed || (dateCheck && parsed.date !== dateCheck)) return null;
-  if (parsed.tasks) parsed.tasks = migrateTasks(parsed.tasks);
-  return parsed;
+  const p = ls(key, null);
+  if (!p || (dateCheck && p.date !== dateCheck)) return null;
+  if (p.tasks) p.tasks = migrateTasks(p.tasks);
+  return p;
 }
 
 function loadHistory() { return ls(HISTORY_KEY, []); }
-
 function saveToHistory(entry) {
-  const history = loadHistory();
-  const idx = history.findIndex((h) => h.date === entry.date && h.mode === entry.mode);
-  if (idx >= 0) history[idx] = entry; else history.push(entry);
-  lsSet(HISTORY_KEY, history.slice(-30));
+  const h = loadHistory();
+  const i = h.findIndex((x) => x.date === entry.date && x.mode === entry.mode);
+  if (i >= 0) h[i] = entry; else h.push(entry);
+  lsSet(HISTORY_KEY, h.slice(-30));
+}
+
+// Toast hook
+function useToast() {
+  const [msg, setMsg] = useState(null);
+  const timer = useRef(null);
+  const show = useCallback((text, ms = 2000) => {
+    clearTimeout(timer.current);
+    setMsg(text);
+    timer.current = setTimeout(() => setMsg(null), ms);
+  }, []);
+  return [msg, show];
 }
 
 export default function App() {
@@ -99,6 +97,7 @@ export default function App() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [editingTask, setEditingTask] = useState(null);
   const [editingTaskValue, setEditingTaskValue] = useState("");
+  const [toast, showToast] = useToast();
   const inputRefs = useRef({});
   const clearTimer = useRef(null);
 
@@ -121,6 +120,7 @@ export default function App() {
   useEffect(() => { lsSet(COLLAPSED_KEY, collapsed); }, [collapsed]);
 
   const switchMode = (m) => {
+    if (m === mode) return;
     const total = Object.values(tasks).reduce((s, a) => s + a.length, 0);
     if (total > 0) saveToHistory({
       date: mode === "daily" ? getToday() : getWeekId(), mode, tasks,
@@ -152,26 +152,20 @@ export default function App() {
     if (collapsed[catId]) setCollapsed((p) => ({ ...p, [catId]: false }));
   };
 
-  const removeTask = (catId, idx) => {
-    setTasks((p) => ({ ...p, [catId]: p[catId].filter((_, i) => i !== idx) }));
-  };
-
-  const toggleTaskLevel = (catId, idx) => {
-    setTasks((p) => ({ ...p, [catId]: p[catId].map((t, i) => i === idx ? { ...t, level: t.level === 0 ? 1 : 0 } : t) }));
-  };
+  const removeTask = (catId, idx) => setTasks((p) => ({ ...p, [catId]: p[catId].filter((_, i) => i !== idx) }));
+  const toggleTaskLevel = (catId, idx) => setTasks((p) => ({ ...p, [catId]: p[catId].map((t, i) => i === idx ? { ...t, level: t.level === 0 ? 1 : 0 } : t) }));
 
   const moveTask = (catId, idx, dir) => {
     setTasks((p) => {
       const arr = [...(p[catId] || [])];
-      const newIdx = idx + dir;
-      if (newIdx < 0 || newIdx >= arr.length) return p;
-      [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
+      const n = idx + dir;
+      if (n < 0 || n >= arr.length) return p;
+      [arr[idx], arr[n]] = [arr[n], arr[idx]];
       return { ...p, [catId]: arr };
     });
   };
 
   const togglePriority = (catId) => setPriorities((p) => ({ ...p, [catId]: !p[catId] }));
-
   const startEditTask = (catId, idx, value) => { setEditingTask({ catId, idx }); setEditingTaskValue(value); };
   const saveEditTask = () => {
     if (!editingTask) return;
@@ -190,23 +184,19 @@ export default function App() {
         lines.push("->> Prioridades:");
         prio.forEach((cat) => {
           lines.push(`\t-> ${cat.label}:`);
-          (tasks[cat.id] || []).forEach((t) => {
-            lines.push(`${t.level === 1 ? "\t\t\t" : "\t\t"}- ${t.text};`);
-          });
+          (tasks[cat.id] || []).forEach((t) => lines.push(`${t.level === 1 ? "\t\t\t" : "\t\t"}- ${t.text};`));
         });
       }
       normal.forEach((cat) => {
         lines.push(`-> ${cat.label}:`);
-        (tasks[cat.id] || []).forEach((t) => {
-          lines.push(`${t.level === 1 ? "\t\t" : "\t"}- ${t.text};`);
-        });
+        (tasks[cat.id] || []).forEach((t) => lines.push(`${t.level === 1 ? "\t\t" : "\t"}- ${t.text};`));
       });
     } else {
       categories.forEach((cat) => {
         const ct = tasks[cat.id] || [];
         if (!ct.length) return;
         lines.push(`-> ${cat.label}:`);
-        ct.forEach((t) => { lines.push(`${t.level === 1 ? "\t\t" : "\t"}- ${t.text};`); });
+        ct.forEach((t) => lines.push(`${t.level === 1 ? "\t\t" : "\t"}- ${t.text};`));
       });
     }
     return lines.join("\n");
@@ -215,7 +205,8 @@ export default function App() {
   const copyToClipboard = () => {
     const text = generateOutput();
     navigator.clipboard.writeText(text).then(() => {
-      setCopied(true); setTimeout(() => setCopied(false), 2000);
+      setCopied(true); setTimeout(() => setCopied(false), 2200);
+      showToast("Check-in copiado!");
       saveToHistory({
         date: mode === "daily" ? getToday() : getWeekId(), mode, tasks,
         priorities: mode === "weekly" ? priorities : undefined,
@@ -231,10 +222,21 @@ export default function App() {
     }
     clearTimeout(clearTimer.current);
     setTasks({}); setPriorities({}); setShowOutput(false); setConfirmClear(false);
+    showToast("Limpo!");
   };
 
   const totalTasks = Object.values(tasks).reduce((s, a) => s + a.length, 0);
   const activeCats = categories.filter((c) => (tasks[c.id] || []).length > 0).length;
+  const output = generateOutput();
+  const charCount = output.length;
+  const hasContent = totalTasks > 0;
+  const isW = mode === "weekly";
+  const accent = isW ? "#8b5cf6" : "#f59e0b";
+  const accentDark = isW ? "#5b21b6" : "#78350f";
+  const accentBg = isW ? "#1a1025" : "#1a1508";
+  const dateLabel = isW ? `${getMonday()} → ${getFriday()}` : getToday();
+  const history = loadHistory();
+  const recentDaily = history.filter((h) => h.mode === "daily").slice(-7).reverse();
 
   const addCategory = () => {
     const name = newCatName.trim();
@@ -244,270 +246,269 @@ export default function App() {
     setCategories((p) => [...p, { id, label: name, icon: "◆" }]);
     setNewCatName("");
   };
-
   const removeCategory = (id) => {
     setCategories((p) => p.filter((c) => c.id !== id));
     setTasks((p) => { const n = { ...p }; delete n[id]; return n; });
   };
-
-  const output = generateOutput();
-  const hasContent = totalTasks > 0;
-  const isWeekly = mode === "weekly";
-  const accent = isWeekly ? "#8b5cf6" : "#f59e0b";
-  const accentBg = isWeekly ? "#1a1025" : "#1a1508";
-  const dateLabel = isWeekly ? `${getMonday()} → ${getFriday()}` : getToday();
-  const history = loadHistory();
-  const recentDaily = history.filter((h) => h.mode === "daily").slice(-7).reverse();
+  const moveCat = (idx, dir) => {
+    setCategories((p) => {
+      const arr = [...p]; const n = idx + dir;
+      if (n < 0 || n >= arr.length) return p;
+      [arr[idx], arr[n]] = [arr[n], arr[idx]];
+      return arr;
+    });
+  };
 
   return (
-    <div style={{ minHeight: "100vh", minHeight: "100dvh", background: "#0a0a0b", color: "#d4d4d8", fontFamily: "'JetBrains Mono', 'Fira Code', monospace" }}>
+    <div style={{ minHeight: "100dvh", background: "#0a0a0b", color: "#d4d4d8", fontFamily: "'JetBrains Mono', 'Fira Code', monospace" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
-        *{box-sizing:border-box;margin:0;padding:0}
-        html{-webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent}
-        input,button{-webkit-appearance:none;-moz-appearance:none}
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent}
+input,button{-webkit-appearance:none;-moz-appearance:none}
 
-        .ci-input{background:#18181b;border:1px solid #27272a;color:#d4d4d8;font-family:'JetBrains Mono',monospace;font-size:16px;padding:12px 14px;border-radius:8px;outline:none;width:100%;transition:border-color .15s}
-        .ci-input:focus{border-color:${accent}}
-        .ci-input::placeholder{color:#52525b}
-        .ci-input.sub{border-color:#78350f;padding-left:32px}
-        .ci-input.sub:focus{border-color:${accent}}
+.ci{background:#18181b;border:1px solid #27272a;color:#d4d4d8;font-family:'JetBrains Mono',monospace;font-size:16px;padding:12px 14px;border-radius:8px;outline:none;width:100%;transition:border-color .15s}
+.ci:focus{border-color:${accent}}.ci::placeholder{color:#52525b}
+.ci.sub{border-color:${accentDark};padding-left:32px}.ci.sub:focus{border-color:${accent}}
 
-        .cat-sec{background:#111113;border:1px solid #1e1e22;border-radius:10px;padding:14px;margin-bottom:10px;transition:border-color .2s}
-        .cat-sec.prio{border-color:#5b21b6;background:#0f0d14}
+.cs{background:#111113;border:1px solid #1e1e22;border-radius:10px;padding:14px;margin-bottom:10px;transition:border-color .2s}
+.cs.prio{border-color:${accentDark};background:#0f0d14}
 
-        .cat-header{display:flex;align-items:center;justify-content:space-between;padding:2px 0;cursor:pointer;-webkit-user-select:none;user-select:none;min-height:36px}
-        .cat-header-left{display:flex;align-items:center;gap:8px;min-width:0;flex:1}
-        .cat-header-right{display:flex;align-items:center;gap:6px}
-        .chevron{font-size:10px;color:#52525b;transition:transform .2s;flex-shrink:0}
-        .chevron.open{transform:rotate(90deg)}
+.ch{display:flex;align-items:center;justify-content:space-between;padding:2px 0;cursor:pointer;-webkit-user-select:none;user-select:none;min-height:40px;gap:8px}
+.ch-l{display:flex;align-items:center;gap:8px;min-width:0;flex:1;overflow:hidden}
+.ch-r{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.chv{font-size:10px;color:#52525b;transition:transform .2s;flex-shrink:0}.chv.o{transform:rotate(90deg)}
 
-        .task-item{display:flex;align-items:flex-start;gap:8px;padding:10px;border-radius:6px;margin:3px 0;background:#18181b;border:1px solid transparent;transition:all .15s;min-height:44px}
-        .task-item:hover{border-color:#27272a}
-        .task-item.sub{margin-left:20px;background:#141416;border-left:2px solid #27272a;border-radius:0 6px 6px 0}
-        .task-item.sub:hover{border-left-color:${accent}}
-        .task-actions{display:flex;gap:2px;flex-shrink:0;opacity:0;transition:opacity .15s}
-        .task-item:hover .task-actions{opacity:1}
+.ti{display:flex;align-items:flex-start;gap:8px;padding:10px;border-radius:6px;margin:3px 0;background:#18181b;border:1px solid transparent;transition:all .15s;min-height:44px}
+.ti:hover{border-color:#27272a}
+.ti.si{margin-left:20px;background:#141416;border-left:2px solid #27272a;border-radius:0 6px 6px 0}
+.ti.si:hover{border-left-color:${accent}}
+.ta{display:flex;gap:2px;flex-shrink:0;opacity:0;transition:opacity .15s}.ti:hover .ta{opacity:1}
 
-        .ibtn{background:none;border:1px solid transparent;color:#52525b;cursor:pointer;padding:4px 8px;border-radius:6px;font-size:13px;font-family:'JetBrains Mono',monospace;transition:all .15s;min-width:36px;min-height:36px;display:flex;align-items:center;justify-content:center}
-        .ibtn:hover{color:#d4d4d8;border-color:#3f3f46;background:#27272a}
-        .ibtn.danger:hover{color:#ef4444;border-color:#7f1d1d;background:#1c0a0a}
-        .ibtn.indent:hover{color:${accent};border-color:${isWeekly?"#5b21b6":"#78350f"};background:${accentBg}}
-        .ibtn.move:hover{color:${accent};border-color:${isWeekly?"#5b21b6":"#78350f"};background:${accentBg}}
+.ib{background:none;border:1px solid transparent;color:#52525b;cursor:pointer;padding:4px 8px;border-radius:6px;font-size:13px;font-family:'JetBrains Mono',monospace;transition:all .15s;min-width:36px;min-height:36px;display:flex;align-items:center;justify-content:center}
+.ib:hover{color:#d4d4d8;border-color:#3f3f46;background:#27272a}
+.ib.dng:hover{color:#ef4444;border-color:#7f1d1d;background:#1c0a0a}
+.ib.ind:hover,.ib.mv:hover{color:${accent};border-color:${accentDark};background:${accentBg}}
 
-        .qtag{display:inline-flex;background:#1a1a1f;border:1px dashed #27272a;color:#71717a;font-size:12px;font-family:'JetBrains Mono',monospace;padding:8px 12px;border-radius:6px;cursor:pointer;transition:all .15s;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-        .qtag:hover{border-color:${accent};color:${accent};border-style:solid;background:${accentBg}}
-        .qtag.used{opacity:.3;cursor:default;border-style:solid}
+.qt{display:inline-flex;background:#1a1a1f;border:1px dashed #27272a;color:#71717a;font-size:12px;font-family:'JetBrains Mono',monospace;padding:8px 12px;border-radius:6px;cursor:pointer;transition:all .15s;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qt:hover{border-color:${accent};color:${accent};border-style:solid;background:${accentBg}}
+.qt.u{opacity:.3;cursor:default;border-style:solid}
 
-        .btn-primary{background:${accent};color:${isWeekly?"#fff":"#0a0a0b"};border:none;font-family:'JetBrains Mono',monospace;font-weight:600;font-size:14px;padding:14px 20px;border-radius:8px;cursor:pointer;transition:all .15s;min-height:48px;width:100%}
-        .btn-primary:hover{filter:brightness(1.15);transform:translateY(-1px)}
-        .btn-primary:active{transform:translateY(0)}
-        .btn-primary.copied{background:#22c55e}
+.bp{background:${accent};color:${isW?"#fff":"#0a0a0b"};border:none;font-family:'JetBrains Mono',monospace;font-weight:600;font-size:14px;padding:14px 20px;border-radius:8px;cursor:pointer;transition:all .15s;min-height:48px;width:100%}
+.bp:hover{filter:brightness(1.15);transform:translateY(-1px)}.bp:active{transform:translateY(0)}.bp.cp{background:#22c55e}
 
-        .btn-ghost{background:none;border:1px solid #27272a;color:#71717a;font-family:'JetBrains Mono',monospace;font-size:12px;padding:10px 14px;border-radius:8px;cursor:pointer;transition:all .15s;min-height:48px}
-        .btn-ghost:hover{border-color:#3f3f46;color:#a1a1aa;background:#18181b}
+.bg{background:none;border:1px solid #27272a;color:#71717a;font-family:'JetBrains Mono',monospace;font-size:12px;padding:10px 14px;border-radius:8px;cursor:pointer;transition:all .15s;min-height:48px}
+.bg:hover{border-color:#3f3f46;color:#a1a1aa;background:#18181b}
 
-        .output-block{background:#0f0f11;border:1px solid #27272a;border-radius:8px;padding:16px;font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word;color:#a1a1aa;max-height:50vh;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.ob{background:#0f0f11;border:1px solid #27272a;border-radius:8px;padding:16px;font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word;color:#a1a1aa;max-height:50vh;overflow-y:auto;-webkit-overflow-scrolling:touch}
 
-        .badge{display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;min-width:20px;height:20px;border-radius:10px;padding:0 6px}
+.bdg{display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;min-width:20px;height:20px;border-radius:10px;padding:0 6px;flex-shrink:0}
 
-        .header{background:#0f0f11;border-bottom:1px solid #1e1e22;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10;gap:8px;flex-wrap:wrap}
-        .h-left{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap}
-        .h-right{display:flex;align-items:center;gap:10px}
+/* HEADER */
+.hdr{background:#0f0f11;border-bottom:1px solid #1e1e22;padding:10px 16px;position:sticky;top:0;z-index:10}
+.hdr-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.hdr-l{display:flex;align-items:center;gap:8px;min-width:0}
+.hdr-r{display:flex;align-items:center;gap:8px}
+.hdr-meta{display:flex;align-items:center;gap:12px;padding-top:8px;justify-content:space-between}
 
-        .mode-tog{display:flex;background:#18181b;border:1px solid #27272a;border-radius:8px;overflow:hidden}
-        .mode-btn{background:none;border:none;color:#52525b;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;padding:8px 14px;cursor:pointer;transition:all .15s;min-height:36px}
-        .mode-btn:hover{color:#a1a1aa}
-        .mode-btn.on{background:#f59e0b;color:#0a0a0b}
-        .mode-btn.on-w{background:#8b5cf6;color:#fff}
+.mt{display:flex;background:#18181b;border:1px solid #27272a;border-radius:8px;overflow:hidden}
+.mb{background:none;border:none;color:#52525b;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;padding:8px 14px;cursor:pointer;transition:all .15s;min-height:36px}
+.mb:hover{color:#a1a1aa}.mb.on{background:#f59e0b;color:#0a0a0b}.mb.onw{background:#8b5cf6;color:#fff}
 
-        .stat{display:flex;flex-direction:column;align-items:center;gap:1px}
-        .stat-v{font-size:16px;font-weight:700;color:${accent}}
-        .stat-l{font-size:9px;color:#52525b;text-transform:uppercase;letter-spacing:.5px}
+.st{display:flex;align-items:center;gap:6px;font-size:11px;color:#52525b}
+.st b{color:${accent};font-size:14px;font-weight:700}
 
-        .overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:flex-end;justify-content:center;z-index:100;backdrop-filter:blur(4px);padding:0}
-        .modal{background:#111113;border:1px solid #27272a;border-radius:16px 16px 0 0;padding:20px;width:100%;max-width:560px;max-height:85vh;overflow-y:auto;-webkit-overflow-scrolling:touch;animation:slideUp .25s ease-out}
+.ov{position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:flex-end;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
+.mdl{background:#111113;border:1px solid #27272a;border-radius:16px 16px 0 0;padding:20px;padding-bottom:max(20px,env(safe-area-inset-bottom));width:100%;max-width:560px;max-height:85vh;overflow-y:auto;-webkit-overflow-scrolling:touch;animation:su .25s ease-out}
+.mdl-bar{width:40px;height:4px;border-radius:2px;background:#27272a;margin:0 auto 16px}
 
-        .add-btn{background:#18181b;border:1px solid #27272a;color:${accent};font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:600;border-radius:8px;cursor:pointer;transition:all .15s;flex-shrink:0;width:48px;height:48px;display:flex;align-items:center;justify-content:center}
-        .add-btn:hover{background:${accentBg};border-color:${accent}}
+.ab{background:#18181b;border:1px solid #27272a;color:${accent};font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:600;border-radius:8px;cursor:pointer;transition:all .15s;flex-shrink:0;width:48px;height:48px;display:flex;align-items:center;justify-content:center}
+.ab:hover{background:${accentBg};border-color:${accent}}
 
-        .indent-tog{background:none;border:1px solid #27272a;color:#52525b;font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:600;border-radius:8px;cursor:pointer;transition:all .15s;flex-shrink:0;width:48px;height:48px;display:flex;align-items:center;justify-content:center}
-        .indent-tog:hover{border-color:${isWeekly?"#5b21b6":"#78350f"};color:${accent};background:${accentBg}}
-        .indent-tog.on{border-color:${accent};color:${accent};background:${accentBg}}
+.it{background:none;border:1px solid #27272a;color:#52525b;font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:600;border-radius:8px;cursor:pointer;transition:all .15s;flex-shrink:0;width:48px;height:48px;display:flex;align-items:center;justify-content:center}
+.it:hover{border-color:${accentDark};color:${accent};background:${accentBg}}
+.it.on{border-color:${accent};color:${accent};background:${accentBg}}
 
-        .prio-btn{background:none;border:1px solid #27272a;color:#52525b;font-size:11px;padding:4px 10px;border-radius:6px;cursor:pointer;transition:all .15s;min-height:32px;display:flex;align-items:center;gap:4px;font-family:'JetBrains Mono',monospace;white-space:nowrap}
-        .prio-btn:hover{border-color:#8b5cf6;color:#8b5cf6}
-        .prio-btn.on{border-color:#8b5cf6;color:#8b5cf6;background:#1a1025}
+.pb{background:none;border:1px solid #27272a;color:#52525b;font-size:11px;padding:4px 10px;border-radius:6px;cursor:pointer;transition:all .15s;min-height:32px;display:flex;align-items:center;gap:4px;font-family:'JetBrains Mono',monospace;white-space:nowrap}
+.pb:hover{border-color:#8b5cf6;color:#8b5cf6}.pb.on{border-color:#8b5cf6;color:#8b5cf6;background:#1a1025}
 
-        .edit-input{background:#0a0a0b;border:1px solid ${accent};color:#d4d4d8;font-family:'JetBrains Mono',monospace;font-size:16px;padding:10px;border-radius:6px;outline:none;width:100%}
+.ei{background:#0a0a0b;border:1px solid ${accent};color:#d4d4d8;font-family:'JetBrains Mono',monospace;font-size:16px;padding:10px;border-radius:6px;outline:none;width:100%}
 
-        .input-wrap{position:relative;flex:1;min-width:0}
-        .sub-ind{position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:12px;color:${accent};pointer-events:none}
-        .input-row{display:flex;gap:6px;margin-top:10px;align-items:center}
+.iw{position:relative;flex:1;min-width:0}
+.si-ind{position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:12px;color:${accent};pointer-events:none}
+.ir{display:flex;gap:6px;margin-top:10px;align-items:center}
 
-        .tab-hint{font-size:10px;color:#3f3f46;margin-top:4px;display:none;align-items:center;gap:4px}
-        .tab-hint kbd{background:#1e1e22;border:1px solid #27272a;border-radius:3px;padding:1px 5px;font-family:'JetBrains Mono',monospace;font-size:9px;color:#52525b}
+.th{font-size:10px;color:#3f3f46;margin-top:4px;display:none;align-items:center;gap:4px}
+.th kbd{background:#1e1e22;border:1px solid #27272a;border-radius:3px;padding:1px 5px;font-family:'JetBrains Mono',monospace;font-size:9px;color:#52525b}
 
-        .actions{display:flex;flex-direction:column;gap:8px;margin-top:24px}
-        .actions-row{display:flex;gap:8px}
+.acts{display:flex;flex-direction:column;gap:8px;margin-top:24px}
+.acts-r{display:flex;gap:8px}
 
-        .hist-item{background:#18181b;border:1px solid #27272a;border-radius:8px;padding:12px;margin-bottom:8px}
-        .hist-date{font-size:11px;color:${accent};font-weight:600;margin-bottom:6px}
-        .hist-text{font-size:11px;color:#71717a;line-height:1.5;white-space:pre-wrap;max-height:120px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.hi{background:#18181b;border:1px solid #27272a;border-radius:8px;padding:12px;margin-bottom:8px}
+.hd{font-size:11px;color:${accent};font-weight:600;margin-bottom:6px}
+.ht{font-size:11px;color:#71717a;line-height:1.5;white-space:pre-wrap;max-height:120px;overflow-y:auto;-webkit-overflow-scrolling:touch}
 
-        .clear-warn{background:#7f1d1d !important;border-color:#ef4444 !important;color:#fff !important}
+.cw{background:#7f1d1d!important;border-color:#ef4444!important;color:#fff!important}
 
-        .empty-cat{font-size:11px;color:#3f3f46;padding:4px 0;font-style:italic}
+.cc{display:flex;align-items:center;gap:6px;font-size:10px;color:#3f3f46}
+.cc.warn{color:#ef4444}
 
-        @media(hover:none)and(pointer:coarse){
-          .task-actions{opacity:1!important}
-        }
-        @media(hover:hover)and(pointer:fine){
-          .tab-hint{display:flex}
-          .indent-tog{display:none}
-          .overlay{align-items:center;padding:16px}
-          .modal{border-radius:12px;animation:fadeScale .2s ease-out}
-        }
-        @media(min-width:481px){
-          .actions{flex-direction:row;justify-content:space-between;flex-wrap:wrap}
-          .actions-row{flex:1}
-          .btn-primary{width:auto}
-        }
-        @media(max-width:480px){
-          .header{padding:10px 12px}
-          .h-title{font-size:13px!important}
-          .h-date{display:none}
-          .cat-sec{padding:12px 10px;border-radius:8px}
-          .mode-btn{padding:6px 10px;font-size:11px}
-          .output-block{font-size:11px;padding:12px}
-        }
-        @media(max-width:360px){
-          .stat{display:none}
-          .mode-btn{padding:6px 8px;font-size:10px}
-        }
+.toast{position:fixed;bottom:max(24px,env(safe-area-inset-bottom,24px));left:50%;transform:translateX(-50%);background:#22c55e;color:#fff;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;padding:10px 24px;border-radius:10px;z-index:200;animation:su .2s ease-out;pointer-events:none;white-space:nowrap}
 
-        @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-        @keyframes slideUp{from{opacity:0;transform:translateY(40px)}to{opacity:1;transform:translateY(0)}}
-        @keyframes fadeScale{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
-        .fade-in{animation:fadeIn .2s ease-out}
+.set-item{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:8px;margin-bottom:4px;background:#18181b;gap:8px}
+.set-item .set-l{display:flex;align-items:center;gap:8px;flex:1;min-width:0;overflow:hidden}
+.set-item .set-r{display:flex;align-items:center;gap:2px;flex-shrink:0}
+
+@media(hover:none)and(pointer:coarse){.ta{opacity:1!important}}
+@media(hover:hover)and(pointer:fine){
+  .th{display:flex}.it{display:none}
+  .ov{align-items:center;padding:16px}
+  .mdl{border-radius:12px;animation:fs .2s ease-out}
+  .mdl-bar{display:none}
+}
+@media(min-width:481px){
+  .acts{flex-direction:row;justify-content:space-between;flex-wrap:wrap}
+  .acts-r{flex:1}
+  .bp{width:auto}
+  .hdr-meta{padding-top:0;gap:16px}
+  .hdr-top{gap:12px}
+  .hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px}
+  .hdr-top{flex:1}.hdr-meta{padding:0}
+}
+@media(max-width:480px){
+  .mb{padding:6px 10px;font-size:11px}
+  .ob{font-size:11px;padding:12px}
+}
+@media(max-width:360px){
+  .st{display:none}
+  .mb{padding:6px 8px;font-size:10px}
+}
+
+@keyframes fi{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes su{from{opacity:0;transform:translateY(40px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fs{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
+.fi{animation:fi .2s ease-out}
       `}</style>
 
+      {/* Toast */}
+      {toast && <div className="toast">{toast}</div>}
+
       {/* Header */}
-      <div className="header">
-        <div className="h-left">
-          <span style={{ color: accent, fontSize: 16 }}>▸</span>
-          <span className="h-title" style={{ fontWeight: 700, fontSize: 15, color: "#e4e4e7", fontFamily: "'Space Mono', monospace" }}>check-in</span>
-          <div className="mode-tog">
-            <button className={`mode-btn ${mode === "daily" ? "on" : ""}`} onClick={() => switchMode("daily")}>Diário</button>
-            <button className={`mode-btn ${mode === "weekly" ? "on-w" : ""}`} onClick={() => switchMode("weekly")}>Semanal</button>
+      <div className="hdr">
+        <div className="hdr-top">
+          <div className="hdr-l">
+            <span style={{ color: accent, fontSize: 16 }}>▸</span>
+            <span style={{ fontWeight: 700, fontSize: 15, color: "#e4e4e7", fontFamily: "'Space Mono',monospace" }}>check-in</span>
+            <div className="mt">
+              <button className={`mb ${mode === "daily" ? "on" : ""}`} onClick={() => switchMode("daily")}>Diário</button>
+              <button className={`mb ${mode === "weekly" ? "onw" : ""}`} onClick={() => switchMode("weekly")}>Semanal</button>
+            </div>
           </div>
-          <span className="h-date" style={{ fontSize: 10, color: "#52525b" }}>{dateLabel}</span>
+          <div className="hdr-r">
+            {isW && <button className="bg" onClick={() => setShowHistory(true)} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>📋</button>}
+            <button className="bg" onClick={() => setShowSettings(true)} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>⚙</button>
+          </div>
         </div>
-        <div className="h-right">
-          <div className="stat">
-            <span className="stat-v">{totalTasks}</span>
-            <span className="stat-l">tasks</span>
+        <div className="hdr-meta">
+          <span style={{ fontSize: 10, color: "#52525b" }}>{dateLabel}</span>
+          <div style={{ display: "flex", gap: 12 }}>
+            <span className="st"><b>{totalTasks}</b> tasks</span>
+            <span className="st"><b>{activeCats}</b> seções</span>
+            {hasContent && (
+              <span className={`cc ${charCount > SLACK_CHAR_LIMIT ? "warn" : ""}`}>
+                {charCount}/{SLACK_CHAR_LIMIT}
+              </span>
+            )}
           </div>
-          <div className="stat">
-            <span className="stat-v">{activeCats}</span>
-            <span className="stat-l">seções</span>
-          </div>
-          {isWeekly && (
-            <button className="btn-ghost" onClick={() => setShowHistory(true)} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>📋</button>
-          )}
-          <button className="btn-ghost" onClick={() => setShowSettings(true)} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>⚙</button>
         </div>
       </div>
 
       {/* Main */}
-      <div style={{ maxWidth: 720, margin: "0 auto", padding: "16px 12px 120px" }}>
+      <div style={{ maxWidth: 720, margin: "0 auto", padding: "12px 12px 120px" }}>
         {categories.map((cat) => {
           const ct = tasks[cat.id] || [];
           const qm = QUICK_TASKS[cat.id];
-          const qt = qm ? (qm[mode] || qm.daily || []) : [];
+          const qts = qm ? (qm[mode] || qm.daily || []) : [];
           const lvl = getLevel(cat.id);
-          const isPrio = isWeekly && priorities[cat.id];
-          const isCollapsed = collapsed[cat.id] && ct.length > 0;
+          const isPrio = isW && priorities[cat.id];
+          const isCol = collapsed[cat.id] && ct.length > 0;
 
           return (
-            <div key={cat.id} className={`cat-sec ${isPrio ? "prio" : ""}`}>
-              <div className="cat-header" onClick={() => ct.length > 0 && toggleCollapsed(cat.id)}>
-                <div className="cat-header-left">
-                  {ct.length > 0 && <span className={`chevron ${!isCollapsed ? "open" : ""}`}>▸</span>}
-                  <span style={{ color: isPrio ? "#8b5cf6" : accent, fontSize: 14 }}>{cat.icon}</span>
+            <div key={cat.id} className={`cs ${isPrio ? "prio" : ""}`}>
+              <div className="ch" onClick={() => ct.length > 0 && toggleCollapsed(cat.id)}>
+                <div className="ch-l">
+                  {ct.length > 0 && <span className={`chv ${!isCol ? "o" : ""}`}>▸</span>}
+                  <span style={{ color: isPrio ? "#8b5cf6" : accent, fontSize: 14, flexShrink: 0 }}>{cat.icon}</span>
                   <span style={{ fontWeight: 600, fontSize: 13, color: "#e4e4e7", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cat.label}</span>
-                  {ct.length > 0 && <span className="badge" style={{ background: isPrio ? "#8b5cf6" : accent, color: isPrio ? "#fff" : "#0a0a0b" }}>{ct.length}</span>}
+                  {ct.length > 0 && <span className="bdg" style={{ background: isPrio ? "#8b5cf6" : accent, color: isPrio ? "#fff" : "#0a0a0b" }}>{ct.length}</span>}
                 </div>
-                <div className="cat-header-right" onClick={(e) => e.stopPropagation()}>
-                  {isWeekly && (
-                    <button className={`prio-btn ${isPrio ? "on" : ""}`} onClick={() => togglePriority(cat.id)}>
-                      {isPrio ? "★" : "☆"} <span style={{ display: "inline" }}>prio</span>
+                <div className="ch-r" onClick={(e) => e.stopPropagation()}>
+                  {isW && (
+                    <button className={`pb ${isPrio ? "on" : ""}`} onClick={() => togglePriority(cat.id)}>
+                      {isPrio ? "★" : "☆"} prio
                     </button>
                   )}
                 </div>
               </div>
 
-              {!isCollapsed && (
-                <div className="fade-in">
-                  {qt.length > 0 && (
+              {!isCol && (
+                <div className="fi">
+                  {qts.length > 0 && (
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 6, margin: "8px 0" }}>
-                      {qt.map((q, i) => {
+                      {qts.map((q, i) => {
                         const used = ct.some((t) => t.text === q);
-                        return (
-                          <span key={i} className={`qtag ${used ? "used" : ""}`} onClick={() => !used && addQuickTask(cat.id, q)} title={q}>
-                            {used ? "✓ " : "+ "}{q.length > 45 ? q.slice(0, 45) + "…" : q}
-                          </span>
-                        );
+                        return <span key={i} className={`qt ${used ? "u" : ""}`} onClick={() => !used && addQuickTask(cat.id, q)} title={q}>
+                          {used ? "✓ " : "+ "}{q.length > 45 ? q.slice(0, 45) + "…" : q}
+                        </span>;
                       })}
                     </div>
                   )}
 
+                  {ct.length === 0 && <div style={{ fontSize: 11, color: "#3f3f46", padding: "4px 0", fontStyle: "italic" }}>Nenhuma atividade</div>}
+
                   {ct.map((task, idx) => (
-                    <div key={idx} className={`task-item fade-in ${task.level === 1 ? "sub" : ""}`}>
+                    <div key={idx} className={`ti fi ${task.level === 1 ? "si" : ""}`}>
                       <span style={{ color: task.level === 1 ? "#78350f" : (isPrio ? "#8b5cf6" : accent), fontSize: 10, marginTop: 6, flexShrink: 0 }}>
                         {task.level === 1 ? "└" : "▸"}
                       </span>
                       {editingTask?.catId === cat.id && editingTask?.idx === idx ? (
                         <div style={{ flex: 1, display: "flex", gap: 6 }}>
-                          <input className="edit-input" value={editingTaskValue} onChange={(e) => setEditingTaskValue(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === "Enter") saveEditTask(); if (e.key === "Escape") { setEditingTask(null); setEditingTaskValue(""); } }}
-                            autoFocus />
-                          <button className="ibtn" onClick={saveEditTask}>✓</button>
+                          <input className="ei" value={editingTaskValue} onChange={(e) => setEditingTaskValue(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === "Enter") saveEditTask(); if (e.key === "Escape") { setEditingTask(null); setEditingTaskValue(""); } }} autoFocus />
+                          <button className="ib" onClick={saveEditTask}>✓</button>
                         </div>
                       ) : (
                         <>
                           <span style={{ fontSize: 13, lineHeight: 1.5, flex: 1, wordBreak: "break-word" }}>{task.text}</span>
-                          <div className="task-actions">
-                            {idx > 0 && <button className="ibtn move" onClick={() => moveTask(cat.id, idx, -1)} title="Subir">↑</button>}
-                            {idx < ct.length - 1 && <button className="ibtn move" onClick={() => moveTask(cat.id, idx, 1)} title="Descer">↓</button>}
-                            <button className="ibtn indent" onClick={() => toggleTaskLevel(cat.id, idx)} title={task.level === 0 ? "Indentar" : "Remover indentação"}>
+                          <div className="ta">
+                            {idx > 0 && <button className="ib mv" onClick={() => moveTask(cat.id, idx, -1)} title="Subir">↑</button>}
+                            {idx < ct.length - 1 && <button className="ib mv" onClick={() => moveTask(cat.id, idx, 1)} title="Descer">↓</button>}
+                            <button className="ib ind" onClick={() => toggleTaskLevel(cat.id, idx)} title={task.level === 0 ? "Indentar" : "Des-indentar"}>
                               {task.level === 0 ? "→" : "←"}
                             </button>
-                            <button className="ibtn" onClick={() => startEditTask(cat.id, idx, task.text)} title="Editar">✎</button>
-                            <button className="ibtn danger" onClick={() => removeTask(cat.id, idx)} title="Remover">✕</button>
+                            <button className="ib" onClick={() => startEditTask(cat.id, idx, task.text)} title="Editar">✎</button>
+                            <button className="ib dng" onClick={() => removeTask(cat.id, idx)} title="Remover">✕</button>
                           </div>
                         </>
                       )}
                     </div>
                   ))}
-
-                  {ct.length === 0 && <div className="empty-cat">Nenhuma atividade ainda</div>}
                 </div>
               )}
 
-              {isCollapsed && (
+              {isCol && (
                 <div style={{ fontSize: 11, color: "#3f3f46", padding: "2px 0", cursor: "pointer" }} onClick={() => toggleCollapsed(cat.id)}>
-                  {ct.length} {ct.length === 1 ? "item" : "itens"} — toque pra expandir
+                  {ct.length} {ct.length === 1 ? "item" : "itens"} — expandir
                 </div>
               )}
 
-              <div className="input-row">
-                <button className={`indent-tog ${lvl === 1 ? "on" : ""}`} onClick={() => toggleInputLevel(cat.id)} title={lvl === 1 ? "Item normal" : "Sub-item"}>↳</button>
-                <div className="input-wrap">
-                  {lvl === 1 && <span className="sub-ind">└</span>}
+              <div className="ir">
+                <button className={`it ${lvl === 1 ? "on" : ""}`} onClick={() => toggleInputLevel(cat.id)} title={lvl === 1 ? "Item normal" : "Sub-item"}>↳</button>
+                <div className="iw">
+                  {lvl === 1 && <span className="si-ind">└</span>}
                   <input ref={(el) => (inputRefs.current[cat.id] = el)}
-                    className={`ci-input ${lvl === 1 ? "sub" : ""}`}
-                    placeholder={lvl === 1 ? "Sub-item..." : isWeekly ? `Planejar ${cat.label}...` : `Adicionar em ${cat.label}...`}
+                    className={`ci ${lvl === 1 ? "sub" : ""}`}
+                    placeholder={lvl === 1 ? "Sub-item..." : isW ? `Planejar ${cat.label}...` : `Adicionar em ${cat.label}...`}
                     value={inputValues[cat.id] || ""}
                     onChange={(e) => setInputValues((p) => ({ ...p, [cat.id]: e.target.value }))}
                     onKeyDown={(e) => {
@@ -515,9 +516,9 @@ export default function App() {
                       if (e.key === "Enter") addTask(cat.id);
                     }} />
                 </div>
-                <button className="add-btn" onClick={() => addTask(cat.id)}>+</button>
+                <button className="ab" onClick={() => addTask(cat.id)}>+</button>
               </div>
-              <div className="tab-hint">
+              <div className="th">
                 <kbd>Tab</kbd> {lvl === 1 ? "sub-item ativo" : "alternar sub-item"}
                 {lvl === 1 && <span style={{ color: accent }}>●</span>}
               </div>
@@ -526,92 +527,96 @@ export default function App() {
         })}
 
         {/* Actions */}
-        <div className="actions">
-          <button className={`btn-primary ${copied ? "copied" : ""}`} onClick={copyToClipboard} disabled={!hasContent} style={{ opacity: hasContent ? 1 : 0.4 }}>
-            {copied ? "✓ Copiado!" : isWeekly ? "⎘ Copiar semanal" : "⎘ Copiar check-in"}
+        <div className="acts">
+          <button className={`bp ${copied ? "cp" : ""}`} onClick={copyToClipboard} disabled={!hasContent} style={{ opacity: hasContent ? 1 : 0.4 }}>
+            {copied ? "✓ Copiado!" : isW ? "⎘ Copiar semanal" : "⎘ Copiar check-in"}
           </button>
-          <div className="actions-row">
-            <button className="btn-ghost" onClick={() => setShowOutput(!showOutput)} disabled={!hasContent} style={{ opacity: hasContent ? 1 : 0.4, flex: 1 }}>
+          <div className="acts-r">
+            <button className="bg" onClick={() => setShowOutput(!showOutput)} disabled={!hasContent} style={{ opacity: hasContent ? 1 : 0.4, flex: 1 }}>
               {showOutput ? "Esconder" : "Preview"}
             </button>
-            <button className={`btn-ghost ${confirmClear ? "clear-warn" : ""}`} onClick={handleClear} disabled={!hasContent && !confirmClear}
+            <button className={`bg ${confirmClear ? "cw" : ""}`} onClick={handleClear} disabled={!hasContent && !confirmClear}
               style={{ opacity: hasContent || confirmClear ? 1 : 0.3, flex: 1 }}>
-              {confirmClear ? "Confirmar?" : `Limpar ${isWeekly ? "semana" : "dia"}`}
+              {confirmClear ? "Confirmar?" : `Limpar ${isW ? "semana" : "dia"}`}
             </button>
           </div>
         </div>
 
         {showOutput && hasContent && (
-          <div style={{ marginTop: 16 }} className="fade-in">
-            <div style={{ fontSize: 11, color: "#52525b", marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>
-              Output → Slack {isWeekly ? "(semanal)" : "(diário)"}
+          <div style={{ marginTop: 16 }} className="fi">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <span style={{ fontSize: 11, color: "#52525b", textTransform: "uppercase", letterSpacing: 1 }}>
+                Output → Slack {isW ? "(semanal)" : "(diário)"}
+              </span>
+              <span className={`cc ${charCount > SLACK_CHAR_LIMIT ? "warn" : ""}`} style={{ fontSize: 11 }}>
+                {charCount} chars
+              </span>
             </div>
-            <div className="output-block">{output}</div>
+            <div className="ob">{output}</div>
           </div>
         )}
       </div>
 
-      {/* History Modal */}
+      {/* History */}
       {showHistory && (
-        <div className="overlay" onClick={() => setShowHistory(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="ov" onClick={() => setShowHistory(false)}>
+          <div className="mdl" onClick={(e) => e.stopPropagation()}>
+            <div className="mdl-bar" />
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
               <span style={{ fontWeight: 700, fontSize: 14, color: "#e4e4e7" }}>📋 Check-ins recentes</span>
-              <button className="ibtn" onClick={() => setShowHistory(false)}>✕</button>
+              <button className="ib" onClick={() => setShowHistory(false)}>✕</button>
             </div>
             {recentDaily.length === 0 ? (
               <div style={{ fontSize: 12, color: "#52525b", textAlign: "center", padding: 24 }}>
-                Nenhum check-in diário salvo ainda.<br />Os check-ins são salvos ao copiar ou trocar de modo.
+                Nenhum check-in diário salvo ainda.<br />Salva ao copiar ou trocar de modo.
               </div>
-            ) : (
-              recentDaily.map((entry, i) => {
-                let preview = [];
-                const cats = ls(CATEGORIES_KEY, DEFAULT_CATEGORIES);
-                cats.forEach((cat) => {
-                  const t = entry.tasks[cat.id] || [];
-                  if (!t.length) return;
-                  preview.push(`-> ${cat.label}:`);
-                  t.forEach((task) => {
-                    const txt = typeof task === "string" ? task : task.text;
-                    const l = typeof task === "string" ? 0 : (task.level || 0);
-                    preview.push(`${l === 1 ? "\t\t" : "\t"}- ${txt};`);
-                  });
+            ) : recentDaily.map((entry, i) => {
+              let preview = [];
+              const cats = ls(CATEGORIES_KEY, DEFAULT_CATEGORIES);
+              cats.forEach((cat) => {
+                const t = entry.tasks[cat.id] || [];
+                if (!t.length) return;
+                preview.push(`-> ${cat.label}:`);
+                t.forEach((task) => {
+                  const txt = typeof task === "string" ? task : task.text;
+                  const l = typeof task === "string" ? 0 : (task.level || 0);
+                  preview.push(`${l === 1 ? "\t\t" : "\t"}- ${txt};`);
                 });
-                return (
-                  <div key={i} className="hist-item">
-                    <div className="hist-date">{entry.date}</div>
-                    <div className="hist-text">{preview.join("\n")}</div>
-                  </div>
-                );
-              })
-            )}
+              });
+              return <div key={i} className="hi"><div className="hd">{entry.date}</div><div className="ht">{preview.join("\n")}</div></div>;
+            })}
           </div>
         </div>
       )}
 
-      {/* Settings Modal */}
+      {/* Settings */}
       {showSettings && (
-        <div className="overlay" onClick={() => setShowSettings(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="ov" onClick={() => setShowSettings(false)}>
+          <div className="mdl" onClick={(e) => e.stopPropagation()}>
+            <div className="mdl-bar" />
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
               <span style={{ fontWeight: 700, fontSize: 14, color: "#e4e4e7" }}>Categorias</span>
-              <button className="ibtn" onClick={() => setShowSettings(false)}>✕</button>
+              <button className="ib" onClick={() => setShowSettings(false)}>✕</button>
             </div>
-            {categories.map((cat) => (
-              <div key={cat.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderRadius: 8, marginBottom: 4, background: "#18181b" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {categories.map((cat, idx) => (
+              <div key={cat.id} className="set-item">
+                <div className="set-l">
                   <span style={{ color: accent }}>{cat.icon}</span>
-                  <span style={{ fontSize: 13 }}>{cat.label}</span>
+                  <span style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cat.label}</span>
                 </div>
-                <button className="ibtn danger" onClick={() => removeCategory(cat.id)}>✕</button>
+                <div className="set-r">
+                  {idx > 0 && <button className="ib mv" onClick={() => moveCat(idx, -1)} title="Subir">↑</button>}
+                  {idx < categories.length - 1 && <button className="ib mv" onClick={() => moveCat(idx, 1)} title="Descer">↓</button>}
+                  <button className="ib dng" onClick={() => removeCategory(cat.id)}>✕</button>
+                </div>
               </div>
             ))}
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <input className="ci-input" placeholder="Nova categoria..." value={newCatName}
+              <input className="ci" placeholder="Nova categoria..." value={newCatName}
                 onChange={(e) => setNewCatName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addCategory(); }} />
-              <button className="add-btn" onClick={addCategory}>+</button>
+              <button className="ab" onClick={addCategory}>+</button>
             </div>
-            <div style={{ fontSize: 11, color: "#52525b", marginTop: 12 }}>Categorias ficam salvas no navegador.</div>
+            <div style={{ fontSize: 11, color: "#52525b", marginTop: 12 }}>Categorias ficam salvas no navegador. Use ↑↓ para reordenar.</div>
           </div>
         </div>
       )}
