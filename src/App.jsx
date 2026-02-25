@@ -104,6 +104,35 @@ export default function App() {
     return () => window.removeEventListener("beforeinstallprompt", handler);
   }, []);
 
+  // Back button handling for PWA
+  const openModals = useRef(new Set());
+
+  const pushState = (id) => {
+    openModals.current.add(id);
+    window.history.pushState({ modal: id }, "");
+  };
+
+  useEffect(() => {
+    // Push initial state so there's always something in history
+    if (!window.history.state) {
+      window.history.replaceState({ root: true }, "");
+    }
+
+    const handlePop = () => {
+      // Close modals in reverse priority
+      if (showImport) { setShowImport(false); openModals.current.delete("import"); return; }
+      if (showHistory) { setShowHistory(false); openModals.current.delete("history"); return; }
+      if (showSettings) { setShowSettings(false); openModals.current.delete("settings"); return; }
+      if (showOutput) { setShowOutput(false); return; }
+      if (mode === "weekly") { switchMode("daily"); return; }
+      // If nothing to close, push state back to prevent exit
+      window.history.pushState({ root: true }, "");
+    };
+
+    window.addEventListener("popstate", handlePop);
+    return () => window.removeEventListener("popstate", handlePop);
+  }, [showImport, showHistory, showSettings, showOutput, mode]);
+
   const handleInstall = async () => {
     if (!installPrompt) return;
     installPrompt.prompt();
@@ -139,6 +168,7 @@ export default function App() {
       date: mode === "daily" ? getToday() : getWeekId(), mode, tasks,
       priorities: mode === "weekly" ? priorities : undefined,
     });
+    if (m === "weekly") pushState("weekly");
     setMode(m); localStorage.setItem(MODE_KEY, m);
     setShowOutput(false); setInputLevels({});
   };
@@ -168,6 +198,9 @@ export default function App() {
       });
     }
     setShowImport(false);
+    openModals.current.delete("import");
+    // Pop the history state we pushed when opening
+    if (window.history.state?.modal === "import") window.history.back();
     setCollapsed({});
     showToast(`Importado de ${entry.date}!`);
   };
@@ -479,8 +512,8 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
           </div>
           {/* Mobile-only buttons */}
           <div className="hdr-r">
-            {isW && <button className="bg" onClick={() => setShowHistory(true)} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>📋</button>}
-            <button className="bg" onClick={() => setShowSettings(true)} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>⚙</button>
+            {isW && <button className="bg" onClick={() => { pushState("history"); setShowHistory(true); }} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>📋</button>}
+            <button className="bg" onClick={() => { pushState("settings"); setShowSettings(true); }} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>⚙</button>
           </div>
         </div>
         <div className="hdr-meta">
@@ -492,8 +525,8 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
           </div>
           {/* Desktop-only buttons */}
           <div className="hdr-r-desktop">
-            {isW && <button className="bg" onClick={() => setShowHistory(true)} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>📋</button>}
-            <button className="bg" onClick={() => setShowSettings(true)} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>⚙</button>
+            {isW && <button className="bg" onClick={() => { pushState("history"); setShowHistory(true); }} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>📋</button>}
+            <button className="bg" onClick={() => { pushState("settings"); setShowSettings(true); }} style={{ padding: "6px 10px", minHeight: 36, fontSize: 12 }}>⚙</button>
           </div>
         </div>
       </div>
@@ -518,7 +551,7 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
             <div className="icon">📝</div>
             <div className="msg">
               Nenhuma task ainda hoje.<br />
-              <span className="imp-link" onClick={() => setShowImport(true)}>
+              <span className="imp-link" onClick={() => { pushState("import"); setShowImport(true); }}>
                 Importar de um dia anterior?
               </span>
             </div>
@@ -636,7 +669,7 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
               {showOutput ? "Esconder" : "Preview"}
             </button>
             {mode === "daily" && importableDays.length > 0 && (
-              <button className="bg" onClick={() => setShowImport(true)} style={{ flex: 1 }}>
+              <button className="bg" onClick={() => { pushState("import"); setShowImport(true); }} style={{ flex: 1 }}>
                 📥 Importar
               </button>
             )}
@@ -662,12 +695,12 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
 
       {/* Import Modal */}
       {showImport && (
-        <div className="ov" onClick={() => setShowImport(false)}>
+        <div className="ov" onClick={() => window.history.back()}>
           <div className="mdl" onClick={(e) => e.stopPropagation()}>
             <div className="mdl-bar" />
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
               <span style={{ fontWeight: 700, fontSize: 14, color: "#e4e4e7" }}>📥 Importar dia anterior</span>
-              <button className="ib" onClick={() => setShowImport(false)}>✕</button>
+              <button className="ib" onClick={() => window.history.back()}>✕</button>
             </div>
             <div style={{ fontSize: 11, color: "#52525b", marginBottom: 12 }}>
               Escolha um dia para importar as tasks. <b>Mesclar</b> adiciona sem duplicar, <b>Substituir</b> apaga o atual.
@@ -693,12 +726,12 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
 
       {/* History Modal */}
       {showHistory && (
-        <div className="ov" onClick={() => setShowHistory(false)}>
+        <div className="ov" onClick={() => window.history.back()}>
           <div className="mdl" onClick={(e) => e.stopPropagation()}>
             <div className="mdl-bar" />
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
               <span style={{ fontWeight: 700, fontSize: 14, color: "#e4e4e7" }}>📋 Check-ins recentes</span>
-              <button className="ib" onClick={() => setShowHistory(false)}>✕</button>
+              <button className="ib" onClick={() => window.history.back()}>✕</button>
             </div>
             {recentDaily.length === 0 ? (
               <div style={{ fontSize: 12, color: "#52525b", textAlign: "center", padding: 24 }}>Nenhum check-in salvo ainda.</div>
@@ -717,12 +750,12 @@ input,button{-webkit-appearance:none;-moz-appearance:none}
 
       {/* Settings Modal */}
       {showSettings && (
-        <div className="ov" onClick={() => setShowSettings(false)}>
+        <div className="ov" onClick={() => window.history.back()}>
           <div className="mdl" onClick={(e) => e.stopPropagation()}>
             <div className="mdl-bar" />
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
               <span style={{ fontWeight: 700, fontSize: 14, color: "#e4e4e7" }}>Categorias</span>
-              <button className="ib" onClick={() => setShowSettings(false)}>✕</button>
+              <button className="ib" onClick={() => window.history.back()}>✕</button>
             </div>
             {categories.map((cat, idx) => (
               <div key={cat.id} className="set-item">
